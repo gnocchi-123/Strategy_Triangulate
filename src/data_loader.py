@@ -6,7 +6,7 @@ src/data_loader.py — 데이터 레이어
     "단독 평가=각자 최대 기간, 비교·결합만 공통 기간."
   - 캐시는 raw(시차 처리 전)만 저장. apply_weekly_lag는 캐시 읽은 후 적용.
   - 시장 시세(sp500tr·vix·vix3m): ffill 금지 — 결측은 결측으로 유지·보고.
-  - 공표 시리즈(rf·hy_oas·nfci·stlfsi): 공표된 마지막 값 유지(ffill) = 정상 정보집합.
+  - 공표 시리즈(rf·baa10y·hy_oas·nfci·stlfsi): 공표된 마지막 값 유지(ffill) = 정상 정보집합.
 
 [신용 정보원 대표 신호 = BAA10Y]
   BAA10Y(Moody's Baa − 10Y Treasury): FRED, 1986~, 일간, 무료, ICE rolling 제약 없음.
@@ -18,7 +18,6 @@ src/data_loader.py — 데이터 레이어
 """
 from __future__ import annotations
 
-import os
 import warnings
 from pathlib import Path
 
@@ -99,90 +98,20 @@ def load_prices(cfg: dict, force_refresh: bool = False) -> pd.DataFrame:
     return df
 
 
-def _get_fred_api_key() -> str | None:
-    """
-    FRED API 키를 os.environ에서 읽는다.
-    .env 파일은 모듈 로드 시 load_dotenv()로 이미 os.environ에 반영됨.
-    키가 있으면 반환, 없으면 None.
-    """
-    return os.environ.get("FRED_API_KEY") or None
-
-
-def _fetch_hy_oas_full(api_key: str) -> pd.Series:
-    """
-    FRED API (ALFRED vintage 경로)로 BAMLH0A0HYM2 전체 이력 획득.
-    api_key: FRED 등록 API 키 (.env의 FRED_API_KEY).
-    OAS는 소급 개정이 드물어 latest vintage 사용.
-    반환: DatetimeIndex(일간), Series명 'hy_oas'.
-    """
-    import requests as _req
-
-    url = (
-        "https://api.stlouisfed.org/fred/series/observations"
-        f"?series_id=BAMLH0A0HYM2"
-        f"&observation_start=1990-01-01"
-        f"&file_type=json"
-        f"&api_key={api_key}"
-    )
-    r = _req.get(url, timeout=60)
-    if r.status_code != 200:
-        raise RuntimeError(
-            f"FRED API 오류 (HTTP {r.status_code}): {r.text[:200]}"
-        )
-    data = r.json()
-    if "observations" not in data:
-        raise RuntimeError(f"FRED API 응답에 'observations' 없음: {str(data)[:200]}")
-
-    obs = data["observations"]
-    dates  = pd.to_datetime([o["date"] for o in obs])
-    values = pd.to_numeric([o["value"] for o in obs], errors="coerce")
-    s = pd.Series(values, index=dates, name="hy_oas")
-    s = s.dropna()
-    print(
-        f"  [FRED API:BAMLH0A0HYM2(hy_oas)] "
-        f"{s.index.min().date()} ~ {s.index.max().date()}, n={len(s)}"
-    )
-    return s
-
-
 def load_fred(cfg: dict, force_refresh: bool = False) -> pd.DataFrame:
     """
-    FRED에서 rf·hy_oas·nfci·stlfsi raw 수집.
+    FRED에서 rf·baa10y·hy_oas·nfci·stlfsi raw 수집.
     · 캐시: 시차 처리 전 raw만 저장.
     · STLFSI4: ID 실재 확인 실패 시 즉시 중단·보고.
-    · hy_oas: FRED_API_KEY 있으면 ALFRED vintage로 전체 이력(1996~) 획득.
-              없으면 fredgraph.csv rolling 3년 윈도우(2023-05-30~)로 폴백 + 경고.
+    · hy_oas: FRED rolling 3년 윈도우(2026-04~)로 2023-05-30~만 가용 — 보조 역할.
     """
     if not force_refresh and FRED_CACHE.exists():
         print(f"[캐시 사용] {FRED_CACHE}")
         return pd.read_parquet(FRED_CACHE)
 
-    api_key = _get_fred_api_key()
-    if api_key:
-        print(f"[FRED API 키 감지] BAMLH0A0HYM2 전체 이력 획득 경로 사용")
-    else:
-        print(
-            "[FRED_API_KEY 없음] hy_oas는 rolling 3년 윈도우(2023-05-30~)로 로드됩니다.\n"
-            "  전체 이력(1996~)이 필요하면 .env 파일에 FRED_API_KEY를 설정하세요.\n"
-            "  (.env.example 참고 — https://fred.stlouisfed.org/docs/api/api_key.html)"
-        )
-
     print("[FRED 다운로드]")
     frames: list[pd.Series] = []
     for key, fred_id in _FRED_IDS.items():
-        # hy_oas: API 키 있으면 전체 이력 경로
-        if key == "hy_oas" and api_key:
-            try:
-                col = _fetch_hy_oas_full(api_key)
-                frames.append(col)
-                continue
-            except Exception as e:
-                warnings.warn(
-                    f"FRED API hy_oas 전체 이력 실패: {e}\n"
-                    "rolling 3년 윈도우로 폴백합니다.",
-                    stacklevel=2,
-                )
-
         try:
             s = web.DataReader(fred_id, "fred", start="1950-01-01")
         except Exception as e:
@@ -305,16 +234,12 @@ def validate(series_dict: dict[str, pd.Series]) -> dict:
                 info["anomalies"].append(f"|일간수익|>50%: {len(bad)}건")
 
         if key == "baa10y":
-            # BAA10Y는 두 수익률의 차(스프레드)라 이론상 음수 가능.
-            # OAS(hy_oas)와 달리 음수를 에러로 중단하지 않고 건수만 리포트.
+            # 두 수익률의 차라 이론상 음수 가능 — 에러 중단 않고 건수만 리포트
             neg = valid[valid < 0]
             if len(neg):
                 info["anomalies"].append(
-                    f"BAA10Y<0: {len(neg)}건 "
-                    f"(스프레드 음수, 이론상 가능 — 데이터 품질 육안 확인 권장)"
+                    f"BAA10Y<0: {len(neg)}건 (스프레드 음수, 이론상 가능 — 육안 확인 권장)"
                 )
-            else:
-                info["anomalies"].append("BAA10Y<0: 0건 (정상)")
 
         if key == "hy_oas":
             bad = valid[valid < 0]
@@ -325,10 +250,8 @@ def validate(series_dict: dict[str, pd.Series]) -> dict:
                     f"⚠ 기대 시작({_HY_OAS_EXPECTED_START_YEAR}~)보다 늦음 — FRED rolling 3년 윈도우"
                 )
 
-        if not [a for a in info["anomalies"] if not a.startswith("⚠")]:
-            # 이상치(오류) 없음; 경고만 있거나 전혀 없는 경우
-            if not info["anomalies"]:
-                info["anomalies"] = ["없음"]
+        if not info["anomalies"]:
+            info["anomalies"] = ["없음"]
 
         report[key] = info
     return report
