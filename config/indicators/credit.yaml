@@ -1,0 +1,40 @@
+# config/indicators/credit.yaml
+# 신용/금융여건 정보원 — 신호 파라미터 (DEFINITIONS_AND_CONVENTIONS.md 1.2·1.4·5절)
+#
+# ── 대표 신호 재지정 결정 (사전 등록 집합 변경 아님) ─────────────────────────
+# 원래 DEFINITIONS 5절 템플릿은 HY OAS(BAMLH0A0HYM2)를 예시로 기재했으나,
+# DEFINITIONS 1.2절은 "HY OAS 또는 NFCI 등"으로 복수 후보를 명시한다.
+# NFCI로 대표 재지정한 근거:
+#   - FRED 2026-04 rolling 3년 윈도우 정책 적용으로 BAMLH0A0HYM2는 2023-05-30~만 제공.
+#   - FRED API(키 보유) + ALFRED vintage(realtime_end 소급) 전 경로 시도 결과 동일:
+#     2023-05-30~만 반환. realtime_end=2023-01-01 → "does not exist in ALFRED".
+#     영구·진행성 제약으로 FRED에서 1996~ 전체 이력 획득 불가.
+#   - 신용 신호의 가치는 위기 구간(2008·2011·2020) 방어력이다.
+#     2023-05-30~ 3년에는 신용 위기 표본이 없어 단독 검증이 성립하지 않는다.
+#     짧은 표본에서 "노출 축소 손해"가 나오면 신호 실패가 아닌 표본 실패로
+#     결론이 오염된다 → 방안 C(단축 기간 사용) 기각.
+#   - NFCI는 1971~, STLFSI4는 1993~ 제공. M1에서 로드·검증 완료.
+#   - DEFINITIONS 1.2절: "NFCI / 금융스트레스: 합성 금융여건의 긴축 전환 시 방어"
+#     — 사전 등록된 정보원·신호 집합 내 재지정.
+#
+# hy_oas(BAMLH0A0HYM2, 2023-05-30~): 제거하지 않고 보조 역할로 보존.
+#   최근 구간 robustness 확인·향후 재검증용. 단독·결합 메인 분석에는 미사용.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# 대표 신호
+series:           "NFCI"   # Chicago Fed National Financial Conditions Index, 1971~
+                           # 발표 시차: 금요일 기준치 → 다음 주 수요일 공표
+publish_lag_bdays: 3       # +3 영업일 (base.yaml nfci_lag_bdays와 동일, M1 고정)
+                           # BDay 기준 — 미국 공휴일 미인식, over-shift 방향 설계
+
+# 변형·보조 신호 (메인 분석 외)
+aux_series:       "STLFSI4"  # St. Louis Fed Financial Stress Index, 1993~
+                             # 발표 시차: base.yaml stlfsi_lag_bdays=5 BDay
+
+# 상대화 및 매핑 (DEFINITIONS 1.2·1.4)
+# 스트레스 지표 s_t (높을수록 스트레스) → 백분위 p_t → 단조 감소 매핑 → w ∈ [0, w_max]
+percentile_window: 252     # 트레일링 252 거래일 백분위 계산 윈도우
+map:
+  theta_low_pct:  0.5      # p_t < 0.5  → w_max (정상 여건, 풀 노출)
+  theta_high_pct: 0.9      # p_t > 0.9  → 0     (극단 스트레스, 완전 방어)
+                           # 사이: 선형 보간 (DEFINITIONS 1.4 임계 방식)

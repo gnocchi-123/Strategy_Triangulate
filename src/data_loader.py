@@ -8,12 +8,12 @@ src/data_loader.py — 데이터 레이어
   - 시장 시세(sp500tr·vix·vix3m): ffill 금지 — 결측은 결측으로 유지·보고.
   - 공표 시리즈(rf·hy_oas·nfci·stlfsi): 공표된 마지막 값 유지(ffill) = 정상 정보집합.
 
-[hy_oas 데이터 가용성]
-  BAMLH0A0HYM2: FRED가 2026년 4월부터 rolling 3년 윈도우 정책 적용.
-  무료 fredgraph.csv는 현재 2023-05-30~만 제공 (영구·진행성 제약).
-  전체 이력(1996~)은 FRED API + ALFRED vintage 경로로 획득 가능.
-  → load_fred()에서 FRED_API_KEY 존재 시 ALFRED vintage, 없으면 rolling 윈도우 사용.
-  FRED_API_KEY는 .env 파일에 설정 (.env.example 참고, 절대 하드코딩 금지).
+[신용/금융여건 정보원 대표 신호 = NFCI]
+  hy_oas(BAMLH0A0HYM2): FRED 2026-04 rolling 3년 윈도우 정책으로 2023-05-30~만 제공.
+  FRED API + ALFRED vintage(realtime_end 소급) 전 경로 확인 결과 동일. 영구·진행성 제약.
+  단독 검증에 신용 위기 표본이 없어 대표 신호로 사용 불가 → 보조 역할로 보존.
+  대표: NFCI(1971~). 변형/보조: STLFSI4(1993~), hy_oas(2023~, 최근 robustness 전용).
+  상세 근거: config/indicators/credit.yaml 주석 참고.
 """
 from __future__ import annotations
 
@@ -45,9 +45,11 @@ _YFINANCE_TICKERS: dict[str, str] = {
 # 금지: TEDRATE(TED 스프레드, LIBOR 폐지로 단종)
 _FRED_IDS: dict[str, str] = {
     "rf":     "DTB3",          # 연율 % 금리. 일간 rf 변환(÷100÷252)은 backtest.py(M2) 담당.
-    "hy_oas": "BAMLH0A0HYM2",  # HY OAS. ※ ICE 라이선싱 이슈로 2023-05-30~만 가용.
-    "nfci":   "NFCI",          # 주간(금요일 기준). 시카고 연준. 발표 시차 처리 필수.
-    "stlfsi": "STLFSI4",       # 주간. 세인트루이스 연준. ID 실재 확인 필수.
+    # hy_oas: 보조 역할. FRED rolling 3년 윈도우(2026-04~)로 2023-05-30~만 가용.
+    # 메인 신용 신호(NFCI)와 별개로 보존 — 최근 구간 robustness·향후 재검증 전용.
+    "hy_oas": "BAMLH0A0HYM2",
+    "nfci":   "NFCI",          # 【신용 대표】주간(금요일 기준). 시카고 연준. 발표 시차 필수.
+    "stlfsi": "STLFSI4",       # 【신용 변형/보조】주간. 세인트루이스 연준.
 }
 
 # hy_oas 기대 시작 연도 — 이보다 늦으면 경고
@@ -207,10 +209,10 @@ def load_fred(cfg: dict, force_refresh: bool = False) -> pd.DataFrame:
 
         if key == "hy_oas" and start_yr > _HY_OAS_EXPECTED_START_YEAR:
             warnings.warn(
-                f"[데이터 단축 경고] hy_oas(BAMLH0A0HYM2) 실제 시작: "
-                f"{col.dropna().index.min().date()}. "
-                f"FRED rolling 3년 윈도우 정책 적용 중 (2026년 4월~). "
-                "전체 이력은 .env에 FRED_API_KEY 설정 후 재시도하세요.",
+                f"[hy_oas 보조 역할] BAMLH0A0HYM2 실제 시작: "
+                f"{col.dropna().index.min().date()} "
+                f"(FRED rolling 3년 윈도우, 2026-04~). "
+                "메인 신용 신호는 NFCI. hy_oas는 최근 구간 robustness 전용.",
                 stacklevel=2,
             )
 
