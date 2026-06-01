@@ -1,0 +1,11 @@
+# 공통 config — 기간·비용·체결지연·시드·레버리지 (DEFINITIONS_AND_CONVENTIONS.md 5절)
+period:        {start: "1990-01-01", end: null}
+benchmark:     "SP500TR"          # 가격지수 아님, 총수익
+sigma_target:  0.12               # 연율 목표변동성(변동성·결합 공통 타깃)
+w_max:         1.0                # 레버리지 상한(신호 단위)
+rebalance_band: 0.05              # 비중 차이 임계
+cost_bps:      2.0                # 거래 노션널당 bp
+borrow_spread_bps: 50             # 레버리지 차입 스프레드(rf 위)
+leverage_max:  2.0                # 되감기 L 상한
+exec_lag:      1                  # t+1 체결
+seed:          42

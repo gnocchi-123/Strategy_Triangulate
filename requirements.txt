@@ -1,0 +1,11 @@
+pandas>=2.0,<3.0             # pandas 3.0은 pandas-datareader 0.10과 비호환(deprecate_kwarg)
+numpy>=1.24
+yfinance>=0.2.40
+pandas-datareader>=0.10      # FRED (무위험수익·신용·거시)
+scipy>=1.11
+statsmodels>=0.14
+matplotlib>=3.7
+pyarrow>=14                  # parquet 캐시
+pyyaml>=6                    # config
+jupyter
+pytest                       # 룩어헤드/지표 단위 테스트
