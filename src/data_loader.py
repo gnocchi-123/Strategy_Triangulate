@@ -8,11 +8,12 @@ src/data_loader.py — 데이터 레이어
   - 시장 시세(sp500tr·vix·vix3m): ffill 금지 — 결측은 결측으로 유지·보고.
   - 공표 시리즈(rf·hy_oas·nfci·stlfsi): 공표된 마지막 값 유지(ffill) = 정상 정보집합.
 
-[신용/금융여건 정보원 대표 신호 = NFCI]
-  hy_oas(BAMLH0A0HYM2): FRED 2026-04 rolling 3년 윈도우 정책으로 2023-05-30~만 제공.
-  FRED API + ALFRED vintage(realtime_end 소급) 전 경로 확인 결과 동일. 영구·진행성 제약.
-  단독 검증에 신용 위기 표본이 없어 대표 신호로 사용 불가 → 보조 역할로 보존.
-  대표: NFCI(1971~). 변형/보조: STLFSI4(1993~), hy_oas(2023~, 최근 robustness 전용).
+[신용 정보원 대표 신호 = BAA10Y]
+  BAA10Y(Moody's Baa − 10Y Treasury): FRED, 1986~, 일간, 무료, ICE rolling 제약 없음.
+  NFCI보다 순수한 단일 신용 스프레드 → 독립성 분석 오염 없음.
+  HY OAS 대비 위기 반응 폭 작음(IG 하단) → 신용 방어 강도 과소평가 가능. 수용.
+  hy_oas: FRED rolling 3년 윈도우로 2023-05-30~만 가용 → 보조(최근 robustness 전용).
+  NFCI·STLFSI4: 사전 등록된 보조·대안 신호로 유지. 제거 금지.
   상세 근거: config/indicators/credit.yaml 주석 참고.
 """
 from __future__ import annotations
@@ -45,11 +46,12 @@ _YFINANCE_TICKERS: dict[str, str] = {
 # 금지: TEDRATE(TED 스프레드, LIBOR 폐지로 단종)
 _FRED_IDS: dict[str, str] = {
     "rf":     "DTB3",          # 연율 % 금리. 일간 rf 변환(÷100÷252)은 backtest.py(M2) 담당.
-    # hy_oas: 보조 역할. FRED rolling 3년 윈도우(2026-04~)로 2023-05-30~만 가용.
-    # 메인 신용 신호(NFCI)와 별개로 보존 — 최근 구간 robustness·향후 재검증 전용.
+    "baa10y": "BAA10Y",        # 【신용 대표】Moody's Baa − 10Y Treasury, 1986~, 일간.
+    # hy_oas: 보조. FRED rolling 3년 윈도우(2026-04~)로 2023-05-30~만 가용.
+    # 최근 구간 robustness·향후 재검증 전용. 메인 분석 미사용.
     "hy_oas": "BAMLH0A0HYM2",
-    "nfci":   "NFCI",          # 【신용 대표】주간(금요일 기준). 시카고 연준. 발표 시차 필수.
-    "stlfsi": "STLFSI4",       # 【신용 변형/보조】주간. 세인트루이스 연준.
+    "nfci":   "NFCI",          # 【신용 등록 보조/대안】주간. 시카고 연준. 발표 시차 필수.
+    "stlfsi": "STLFSI4",       # 【신용 등록 보조】주간. 세인트루이스 연준.
 }
 
 # hy_oas 기대 시작 연도 — 이보다 늦으면 경고
@@ -209,10 +211,10 @@ def load_fred(cfg: dict, force_refresh: bool = False) -> pd.DataFrame:
 
         if key == "hy_oas" and start_yr > _HY_OAS_EXPECTED_START_YEAR:
             warnings.warn(
-                f"[hy_oas 보조 역할] BAMLH0A0HYM2 실제 시작: "
+                f"[hy_oas 보조] BAMLH0A0HYM2 실제 시작: "
                 f"{col.dropna().index.min().date()} "
                 f"(FRED rolling 3년 윈도우, 2026-04~). "
-                "메인 신용 신호는 NFCI. hy_oas는 최근 구간 robustness 전용.",
+                "메인 신용 신호는 BAA10Y. hy_oas는 최근 구간 robustness 전용.",
                 stacklevel=2,
             )
 
@@ -302,13 +304,18 @@ def validate(series_dict: dict[str, pd.Series]) -> dict:
             if len(bad):
                 info["anomalies"].append(f"|일간수익|>50%: {len(bad)}건")
 
+        if key == "baa10y":
+            bad = valid[valid < 0]
+            if len(bad):
+                info["anomalies"].append(f"BAA10Y<0: {len(bad)}건")
+
         if key == "hy_oas":
             bad = valid[valid < 0]
             if len(bad):
                 info["anomalies"].append(f"HY_OAS<0: {len(bad)}건")
             if len(valid) > 0 and valid.index.min().year > _HY_OAS_EXPECTED_START_YEAR:
                 info["anomalies"].append(
-                    f"⚠ 기대 시작({_HY_OAS_EXPECTED_START_YEAR}~)보다 늦음 — ICE 라이선싱 이슈"
+                    f"⚠ 기대 시작({_HY_OAS_EXPECTED_START_YEAR}~)보다 늦음 — FRED rolling 3년 윈도우"
                 )
 
         if not [a for a in info["anomalies"] if not a.startswith("⚠")]:
@@ -346,7 +353,7 @@ def load_all(cfg: dict, force_refresh: bool = False) -> dict[str, pd.Series]:
         out[key] = prices[key].reindex(trading_index)
 
     # 일간 FRED: ffill 허용 (공표된 마지막 값 유지 = 정상 정보집합)
-    for key in ("rf", "hy_oas"):
+    for key in ("rf", "baa10y", "hy_oas"):
         out[key] = fred[key].reindex(trading_index).ffill()
 
     # 주간 FRED: raw → config lag 시차 처리 → ffill
