@@ -24,12 +24,8 @@ from pathlib import Path
 import pandas as pd
 import pandas_datareader.data as web
 import yfinance as yf
-from dotenv import load_dotenv
 
 _ROOT = Path(__file__).resolve().parent.parent
-
-# 레포 루트의 .env 로드 (있으면 적용, os.environ 이미 설정된 값은 유지)
-load_dotenv(_ROOT / ".env", override=False)
 
 CACHE_DIR = _ROOT / "data"
 PRICES_CACHE = CACHE_DIR / "raw_prices.parquet"
