@@ -24,9 +24,18 @@
 **기간구조(보조, 2007~):** `ts_t = VIX_t / VIX3M_t`. `ts_t > 1`(백워데이션)이면 방어. 매핑은 아래 1.4의 단조 규칙 사용.
 
 ### 1.2 신용
-스트레스 지표 `s_t` (HY OAS 또는 NFCI 등, 발표 시차 시프트 적용). 높을수록 스트레스.
+**대표 신호: BAA10Y** (Moody's Baa 회사채 − 10Y Treasury 스프레드, 일간, 1986~).
+순수 단일 신용 스프레드로, 합성지수(NFCI 등)와 달리 변동성·위험선호 성분 혼재 없음.
+스트레스 지표 `s_t` = BAA10Y (또는 등록 보조: HY OAS·NFCI 등). 높을수록 스트레스.
 - 트레일링 윈도우 W에서 백분위 `p_t = percentile_rank(s_t)` 또는 z-score `z_t`.
 - 목표비중은 1.4의 **단조 감소 매핑**으로 `p_t`(또는 `z_t`) → `w ∈ [0, w_max]`.
+
+> **대체 경위 (사전 등록 일탈, 데이터 가용성 기반):**
+> 원래 1순위 시리즈 HY OAS(BAMLH0A0HYM2)가 FRED 2026-04 rolling 3년 윈도우 정책으로
+> 무료 장기 이력이 소멸(2023-05-30~만 가용). FRED API·ALFRED vintage 전 경로 확인 동일.
+> 데이터 가용성 기반 불가피 대체 — 결과를 보고 선택한 것이 아님.
+> BAA10Y 제약: IG 하단 스프레드라 HY OAS보다 위기 반응 폭 작음 → 신용 방어 강도 과소평가 가능.
+> 보조(등록 유지): HY OAS(2023-05-30~, 최근 robustness 전용), NFCI(1971~), STLFSI4(1993~).
 
 ### 1.3 추세
 - **200일선:** `w = w_max` if `P_t > MA200_t` else `w_floor` (기본 `w_floor=0`; 변형으로 0.5).
@@ -106,7 +115,7 @@ w_floor:       0.0
 
 ## 6. 네이밍 규약
 
-- 시리즈: `sp500tr`, `vix`, `vix3m`, `rf`, `hy_oas`, `nfci`, `ief`, `tlt`
+- 시리즈: `sp500tr`, `vix`, `vix3m`, `rf`, `baa10y`, `hy_oas`, `nfci`, `ief`, `tlt`
 - 컬럼: 수익률 `ret`, 목표비중 `w`, 자산곡선 `equity`, 낙폭 `drawdown`, 회전율 `turnover`
 - 신호 출력 컬럼: `w_vol`, `w_credit`, `w_trend`, 결합 `w_comb`
 - 결과 산출물: `results/{config_name}_{metric|curve|grid|corr|attr}.{png|csv}`
@@ -124,5 +133,6 @@ w_floor:       0.0
 - `^VIX`(신방식, 1990~)만, VXO 혼용 금지
 - `^VIX3M`은 2007~ → 기간구조 피처 표본 축소
 - 주간 지표(NFCI·STLFSI) **발표 시차 시프트** 필수, TED(`TEDRATE`) 단종 → 금지
+- **HY OAS(`BAMLH0A0HYM2`) rolling 3년 윈도우:** FRED 2026-04~로 2023-05-30~만 가용. FRED API·ALFRED vintage 전 경로 확인 동일. 영구·진행성 제약. 신용 대표를 BAA10Y(Moody's Baa − 10Y, 1986~)로 대체. 데이터 가용성 기반 불가피 대체, 결과 기반 아님.
 - 표본 길이 비대칭은 사실: **단독 평가=각자 최대 기간, 비교·결합=공통 기간**
 - 거래일 inner join, 신호 누수 유발 forward-fill 금지

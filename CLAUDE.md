@@ -45,7 +45,7 @@
 ## 3. 환경 가정
 
 - 실행 환경은 **사용자의 GitHub Codespace**다. 인터넷이 열려 있어 `yfinance`·FRED 수신이 정상 작동한다.
-- 데이터 함정 항상 의식: 총수익(`^SP500TR`/`SPY` adj) 사용·가격지수(`^GSPC`) 금지 · `^VIX` 신방식만(VXO 금지) · `^VIX3M`·기간구조 2007~ · 주간 지표 발표 시차 시프트 · TED(`TEDRATE`) 단종 금지 · **표본 길이 비대칭은 사실(단독=각자 최대 기간, 비교·결합=공통 기간)** · 거래일 inner join · forward-fill 금지.
+- 데이터 함정 항상 의식: 총수익(`^SP500TR`/`SPY` adj) 사용·가격지수(`^GSPC`) 금지 · `^VIX` 신방식만(VXO 금지) · `^VIX3M`·기간구조 2007~ · 주간 지표 발표 시차 시프트 · TED(`TEDRATE`) 단종 금지 · **신용 대표=BAA10Y(1986~)**, HY OAS(`BAMLH0A0HYM2`)는 FRED rolling 3년 윈도우(2026-04~)로 2023-05-30~만 가용(보조) · **표본 길이 비대칭은 사실(단독=각자 최대 기간, 비교·결합=공통 기간)** · 거래일 inner join · forward-fill 금지.
 - config(YAML) 기반 재현. 난수 시드 고정.
 
 ---
@@ -58,14 +58,14 @@
 
 ### M1 — 데이터 레이어
 - **만들 것:** `src/data_loader.py`(시세 + FRED 신용/거시 수집·거래일 정합·이상치 검증·parquet 캐시·**주간 지표 발표 시차 시프트**), `notebooks/01_data_audit.ipynb`.
-- **완료 기준:** sp500tr/vix/vix3m/rf/hy_oas/nfci 로드 후 각 시작·종료일·결측·중복·이상치 리포트. VXO 미혼입·총수익 사용·forward-fill 미사용·주간 지표 시차 적용을 코드/로그로 확인. 캐시 재로드 재현.
+- **완료 기준:** sp500tr/vix/vix3m/rf/**baa10y**/hy_oas/nfci 로드 후 각 시작·종료일·결측·중복·이상치 리포트. VXO 미혼입·총수익 사용·forward-fill 미사용·주간 지표 시차 적용을 코드/로그로 확인. 캐시 재로드 재현.
 
 ### M2 — 공통 엔진 + 신호 인터페이스 + 테스트
 - **만들 것:** `src/indicators/base.py`(공통 인터페이스 `signal(data,cfg)->w_target`), `src/backtest.py`(t+1 체결·비용·회전율·레버리지/차입비용·현금 복리), `src/benchmarks.py`(buy&hold·동일노출 정적), `src/metrics.py`(정의 문서 4절 전부), `src/combine.py`(스텁), `tests/test_no_lookahead.py`, `tests/test_metrics.py`.
 - **완료 기준:** `pytest` 전부 통과(특히 룩어헤드: 신호 1일 추가 시프트 시 미래수익 상관 불변, 지표: 알려진 입력 기대값). 엔진이 gross/net 자산곡선·비중·회전율 반환. 더미 신호 하나를 인터페이스로 꽂아 엔드투엔드 동작 확인.
 
 ### M3 — Phase 1 단독 검증 (세 정보원 대칭)
-- **만들 것:** `src/indicators/volatility.py`, `credit.py`, `trend.py`(정의 문서 1절 수식), `notebooks/02_signals_standalone.ipynb`.
+- **만들 것:** `src/indicators/volatility.py`, `credit.py`(**신용 대표=BAA10Y**, NFCI·STLFSI4 등록 보조 포함), `trend.py`(정의 문서 1절 수식), `notebooks/02_signals_standalone.ipynb`.
 - **완료 기준:** **세 정보원 모두** 동일 엔진·net으로 단독 백테스트하고, 각각을 **buy&hold와 동일노출 정적 둘 다**와 비교한 지표표·곡선을 `results/`에 저장. 단독=각자 최대 기간. 각 신호의 실패 양상(휩소/후행)과 조용한 강세장 열위 폭 명시. **어느 정보원에도 특권을 두지 않는다.**
 
 ### M4 — Phase 1 독립성 · Gate 1
