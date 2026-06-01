@@ -305,9 +305,16 @@ def validate(series_dict: dict[str, pd.Series]) -> dict:
                 info["anomalies"].append(f"|일간수익|>50%: {len(bad)}건")
 
         if key == "baa10y":
-            bad = valid[valid < 0]
-            if len(bad):
-                info["anomalies"].append(f"BAA10Y<0: {len(bad)}건")
+            # BAA10Y는 두 수익률의 차(스프레드)라 이론상 음수 가능.
+            # OAS(hy_oas)와 달리 음수를 에러로 중단하지 않고 건수만 리포트.
+            neg = valid[valid < 0]
+            if len(neg):
+                info["anomalies"].append(
+                    f"BAA10Y<0: {len(neg)}건 "
+                    f"(스프레드 음수, 이론상 가능 — 데이터 품질 육안 확인 권장)"
+                )
+            else:
+                info["anomalies"].append("BAA10Y<0: 0건 (정상)")
 
         if key == "hy_oas":
             bad = valid[valid < 0]
