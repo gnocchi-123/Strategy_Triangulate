@@ -8,21 +8,29 @@ src/data_loader.py — 데이터 레이어
   - 시장 시세(sp500tr·vix·vix3m): ffill 금지 — 결측은 결측으로 유지·보고.
   - 공표 시리즈(rf·hy_oas·nfci·stlfsi): 공표된 마지막 값 유지(ffill) = 정상 정보집합.
 
-[hy_oas 데이터 가용성 주의]
-  BAMLH0A0HYM2는 ICE 라이선싱 변경(2023-05-30)으로 FRED에서 이전 이력이 삭제됨.
-  계획상 기대 기간(1996~)과 달리 현재 2023-05-30~만 무료 제공.
-  M3 단독 백테스트 시 이 사실을 명시하고 사용 가능한 구간만 분석.
+[hy_oas 데이터 가용성]
+  BAMLH0A0HYM2: FRED가 2026년 4월부터 rolling 3년 윈도우 정책 적용.
+  무료 fredgraph.csv는 현재 2023-05-30~만 제공 (영구·진행성 제약).
+  전체 이력(1996~)은 FRED API + ALFRED vintage 경로로 획득 가능.
+  → load_fred()에서 FRED_API_KEY 존재 시 ALFRED vintage, 없으면 rolling 윈도우 사용.
+  FRED_API_KEY는 .env 파일에 설정 (.env.example 참고, 절대 하드코딩 금지).
 """
 from __future__ import annotations
 
+import os
 import warnings
 from pathlib import Path
 
 import pandas as pd
 import pandas_datareader.data as web
 import yfinance as yf
+from dotenv import load_dotenv
 
 _ROOT = Path(__file__).resolve().parent.parent
+
+# 레포 루트의 .env 로드 (있으면 적용, os.environ 이미 설정된 값은 유지)
+load_dotenv(_ROOT / ".env", override=False)
+
 CACHE_DIR = _ROOT / "data"
 PRICES_CACHE = CACHE_DIR / "raw_prices.parquet"
 FRED_CACHE   = CACHE_DIR / "raw_fred.parquet"
@@ -87,20 +95,90 @@ def load_prices(cfg: dict, force_refresh: bool = False) -> pd.DataFrame:
     return df
 
 
+def _get_fred_api_key() -> str | None:
+    """
+    FRED API 키를 os.environ에서 읽는다.
+    .env 파일은 모듈 로드 시 load_dotenv()로 이미 os.environ에 반영됨.
+    키가 있으면 반환, 없으면 None.
+    """
+    return os.environ.get("FRED_API_KEY") or None
+
+
+def _fetch_hy_oas_full(api_key: str) -> pd.Series:
+    """
+    FRED API (ALFRED vintage 경로)로 BAMLH0A0HYM2 전체 이력 획득.
+    api_key: FRED 등록 API 키 (.env의 FRED_API_KEY).
+    OAS는 소급 개정이 드물어 latest vintage 사용.
+    반환: DatetimeIndex(일간), Series명 'hy_oas'.
+    """
+    import requests as _req
+
+    url = (
+        "https://api.stlouisfed.org/fred/series/observations"
+        f"?series_id=BAMLH0A0HYM2"
+        f"&observation_start=1990-01-01"
+        f"&file_type=json"
+        f"&api_key={api_key}"
+    )
+    r = _req.get(url, timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(
+            f"FRED API 오류 (HTTP {r.status_code}): {r.text[:200]}"
+        )
+    data = r.json()
+    if "observations" not in data:
+        raise RuntimeError(f"FRED API 응답에 'observations' 없음: {str(data)[:200]}")
+
+    obs = data["observations"]
+    dates  = pd.to_datetime([o["date"] for o in obs])
+    values = pd.to_numeric([o["value"] for o in obs], errors="coerce")
+    s = pd.Series(values, index=dates, name="hy_oas")
+    s = s.dropna()
+    print(
+        f"  [FRED API:BAMLH0A0HYM2(hy_oas)] "
+        f"{s.index.min().date()} ~ {s.index.max().date()}, n={len(s)}"
+    )
+    return s
+
+
 def load_fred(cfg: dict, force_refresh: bool = False) -> pd.DataFrame:
     """
     FRED에서 rf·hy_oas·nfci·stlfsi raw 수집.
     · 캐시: 시차 처리 전 raw만 저장.
     · STLFSI4: ID 실재 확인 실패 시 즉시 중단·보고.
-    · hy_oas: 2023-05-30~만 가용. ICE 라이선싱 이슈로 단축됨 — 경고 출력.
+    · hy_oas: FRED_API_KEY 있으면 ALFRED vintage로 전체 이력(1996~) 획득.
+              없으면 fredgraph.csv rolling 3년 윈도우(2023-05-30~)로 폴백 + 경고.
     """
     if not force_refresh and FRED_CACHE.exists():
         print(f"[캐시 사용] {FRED_CACHE}")
         return pd.read_parquet(FRED_CACHE)
 
+    api_key = _get_fred_api_key()
+    if api_key:
+        print(f"[FRED API 키 감지] BAMLH0A0HYM2 전체 이력 획득 경로 사용")
+    else:
+        print(
+            "[FRED_API_KEY 없음] hy_oas는 rolling 3년 윈도우(2023-05-30~)로 로드됩니다.\n"
+            "  전체 이력(1996~)이 필요하면 .env 파일에 FRED_API_KEY를 설정하세요.\n"
+            "  (.env.example 참고 — https://fred.stlouisfed.org/docs/api/api_key.html)"
+        )
+
     print("[FRED 다운로드]")
     frames: list[pd.Series] = []
     for key, fred_id in _FRED_IDS.items():
+        # hy_oas: API 키 있으면 전체 이력 경로
+        if key == "hy_oas" and api_key:
+            try:
+                col = _fetch_hy_oas_full(api_key)
+                frames.append(col)
+                continue
+            except Exception as e:
+                warnings.warn(
+                    f"FRED API hy_oas 전체 이력 실패: {e}\n"
+                    "rolling 3년 윈도우로 폴백합니다.",
+                    stacklevel=2,
+                )
+
         try:
             s = web.DataReader(fred_id, "fred", start="1950-01-01")
         except Exception as e:
@@ -129,10 +207,10 @@ def load_fred(cfg: dict, force_refresh: bool = False) -> pd.DataFrame:
 
         if key == "hy_oas" and start_yr > _HY_OAS_EXPECTED_START_YEAR:
             warnings.warn(
-                f"[데이터 단축 경고] hy_oas(BAMLH0A0HYM2) 실제 시작: {col.dropna().index.min().date()}. "
-                f"계획 기대 시작 ~{_HY_OAS_EXPECTED_START_YEAR}년보다 늦음. "
-                "ICE 라이선싱 변경으로 FRED에서 이전 이력이 삭제됨. "
-                "M3 신용 신호는 이 기간만 사용 가능 — 명시 필요.",
+                f"[데이터 단축 경고] hy_oas(BAMLH0A0HYM2) 실제 시작: "
+                f"{col.dropna().index.min().date()}. "
+                f"FRED rolling 3년 윈도우 정책 적용 중 (2026년 4월~). "
+                "전체 이력은 .env에 FRED_API_KEY 설정 후 재시도하세요.",
                 stacklevel=2,
             )
 
