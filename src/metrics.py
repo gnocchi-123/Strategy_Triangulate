@@ -87,13 +87,16 @@ def capture_ratios(
     benchmark_returns: pd.Series,
 ) -> tuple[float, float]:
     """
-    상/하방 캡처 (DEFINITIONS 4절 — 연율화 없음).
+    상/하방 캡처 (DEFINITIONS 4절 — Morningstar 표준, 연율화 복리수익 비율).
 
-    상방 = (상승달 전략 복리수익) / (상승달 벤치 복리수익)
-    하방 = (하락달 전략 복리수익) / (하락달 벤치 복리수익)
+    상방 = 전략_ann(상승달) / 벤치_ann(상승달)
+    하방 = 전략_ann(하락달) / 벤치_ann(하락달)
+    연율화 복리수익 ann = (∏(1+r_m))^(12/k) − 1,  k = 해당 집합의 달 수.
 
-    "복리수익" = 해당 달들 월간 수익률의 누적곱 − 1.
-    연율화(^12/n)는 DEFINITIONS에 없으므로 적용하지 않는다.
+    전체 누적곱(∏(1+r_m)−1) 방식은 k가 수백이면 분모가 수천 배로 폭발해
+    비율이 0에 수렴하는 가짜값을 만든다 (예: 289 상승달 → 3.27%).
+    연율화하면 k에 독립적인 "월평균 기하수익의 연율 환산"이 되어
+    경제적으로 해석 가능한 값이 나온다.
     """
     strat_m = (1.0 + strategy_returns).resample("ME").prod() - 1.0
     bench_m = (1.0 + benchmark_returns).resample("ME").prod() - 1.0
@@ -102,16 +105,21 @@ def capture_ratios(
     strat_m = strat_m.loc[common]
     bench_m = bench_m.loc[common]
 
+    def _ann(vals: pd.Series) -> float:
+        k = len(vals)
+        if k == 0:
+            return float("nan")
+        return float((1.0 + vals).prod() ** (12.0 / k) - 1.0)
+
     def _ratio(s_vals: pd.Series, b_vals: pd.Series) -> float:
         if len(b_vals) == 0:
             return float("nan")
-        s_cum = float((1.0 + s_vals).prod() - 1.0)
-        b_cum = float((1.0 + b_vals).prod() - 1.0)
-        if abs(b_cum) < _EPS:
+        b_ann = _ann(b_vals)
+        if abs(b_ann) < _EPS:
             return float("nan")
-        return s_cum / b_cum
+        return _ann(s_vals) / b_ann
 
-    up_mask = bench_m > 0.0
+    up_mask   = bench_m > 0.0
     down_mask = bench_m < 0.0
     return _ratio(strat_m[up_mask], bench_m[up_mask]), _ratio(strat_m[down_mask], bench_m[down_mask])
 

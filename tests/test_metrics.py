@@ -202,21 +202,86 @@ def test_avg_exposure():
 
 def test_capture_ratios_closed_form():
     """
-    상승달 1개(벤치 +10%, 전략 +20%), 하락달 1개(벤치 −5%, 전략 −2.5%).
-    각 월에 거래일 1개씩 → 월간 복리수익 = 일간 수익과 동일 (복리 모호성 없음).
+    연율화 복리수익 비율 닫힌형 검증 (DEFINITIONS 4절, Morningstar 표준).
+    ann = (∏(1+r_m))^(12/k) − 1, k = 해당 달 수.
 
-    up_cap   = 0.20 / 0.10 = 2.0  (닫힌형)
-    down_cap = (−0.025) / (−0.05) = 0.5
-    연율화 없음 — 연율화 공식이면 다른 값이 나온다.
+    상승달 12개: bench +2%/월, strat +1%/월 (각 1거래일)
+      b_up_ann = 1.02^12 − 1 = 0.268242
+      s_up_ann = 1.01^12 − 1 = 0.126825
+      UpCap    = 0.126825 / 0.268242 ≈ 0.47280
+
+    하락달 12개: bench −1%/월, strat −0.5%/월 (각 1거래일)
+      b_dn_ann = 0.99^12 − 1 = −0.113615
+      s_dn_ann = 0.995^12 − 1 = −0.058207
+      DnCap    = −0.058207 / −0.113615 ≈ 0.51228
+
+    비연율화(k=12이면 두 공식이 우연히 동치)이므로 아래 변별 테스트로 보완.
     """
-    # 서로 다른 달에 1거래일씩
-    idx = pd.DatetimeIndex(["2020-01-15", "2020-02-15"])
-    bench = pd.Series([0.10, -0.05],  index=idx)
-    strat = pd.Series([0.20, -0.025], index=idx)
+    # 월별 1거래일: 상승 12개월(2020), 하락 12개월(2021)
+    up_idx = pd.date_range("2020-01-15", periods=12, freq="MS") + pd.offsets.Day(14)
+    dn_idx = pd.date_range("2021-01-15", periods=12, freq="MS") + pd.offsets.Day(14)
+
+    bench = pd.concat([pd.Series([0.02]*12, index=up_idx),
+                       pd.Series([-0.01]*12, index=dn_idx)])
+    strat = pd.concat([pd.Series([0.01]*12, index=up_idx),
+                       pd.Series([-0.005]*12, index=dn_idx)])
 
     up_cap, down_cap = capture_ratios(strat, bench)
-    assert up_cap   == pytest.approx(2.0, rel=1e-6)
-    assert down_cap == pytest.approx(0.5, rel=1e-6)
+
+    exp_up = (1.01**12 - 1) / (1.02**12 - 1)    # ≈ 0.47280
+    exp_dn = (0.995**12 - 1) / (0.99**12 - 1)   # ≈ 0.51228
+    assert up_cap   == pytest.approx(exp_up, rel=1e-6)
+    assert down_cap == pytest.approx(exp_dn, rel=1e-6)
+
+
+def test_capture_ratios_scale_invariance():
+    """
+    Scale-invariance: 같은 월수익 패턴을 k=12/120/240 으로 반복해도
+    캡처 값이 동일해야 한다 (연율화 공식의 핵심 성질).
+
+    균등 수익이면 (r^k)^(12/k) = r^12 이므로 k에 무관하다.
+    비연율화(∏-1) 방식은 k=12→0.47, k=120→0.24, k=240→0.09 로 붕괴한다.
+    """
+    r_b_up, r_s_up = 0.02, 0.01
+    r_b_dn, r_s_dn = -0.01, -0.005
+    theory_up = (1.01**12 - 1) / (1.02**12 - 1)   # ≈ 0.47280
+    theory_dn = (0.995**12 - 1) / (0.99**12 - 1)  # ≈ 0.51382
+
+    for k in [12, 120, 240]:
+        up_idx = pd.date_range("2000-01-01", periods=k, freq="MS") + pd.offsets.Day(14)
+        dn_idx = pd.date_range(up_idx[-1] + pd.offsets.MonthBegin(1),
+                               periods=k, freq="MS") + pd.offsets.Day(14)
+        bench = pd.concat([pd.Series([r_b_up]*k, index=up_idx),
+                           pd.Series([r_b_dn]*k, index=dn_idx)])
+        strat = pd.concat([pd.Series([r_s_up]*k, index=up_idx),
+                           pd.Series([r_s_dn]*k, index=dn_idx)])
+
+        up_cap, dn_cap = capture_ratios(strat, bench)
+        assert up_cap == pytest.approx(theory_up, rel=1e-8), \
+            f"k={k}: UpCap={up_cap:.8f} ≠ {theory_up:.8f} (scale-invariance 위반)"
+        assert dn_cap == pytest.approx(theory_dn, rel=1e-8), \
+            f"k={k}: DnCap={dn_cap:.8f} ≠ {theory_dn:.8f} (scale-invariance 위반)"
+
+
+def test_capture_ratios_long_series_sanity():
+    """
+    20년·65% 고정 노출 전략 → UpCap ≈ 60%, DnCap ≈ 69% (seed=42 기준).
+
+    연율화 공식은 65% 노출에 상응하는 값을 반환.
+    비연율화(∏-1) 방식이면 117개 상승달에서 ≈0%로 수렴한다.
+    실제값: UpCap=59.99%, DnCap=69.08% (seed=42, 20yr, N(0.0004,0.01)).
+    """
+    n = 252 * 20
+    rng = np.random.default_rng(42)
+    bench_d = pd.Series(rng.normal(0.0004, 0.01, n),
+                        index=pd.bdate_range("2000-01-03", periods=n))
+    strat_d = bench_d * 0.65
+
+    up_cap, down_cap = capture_ratios(strat_d, bench_d)
+
+    # 65% 고정 노출 → 캡처가 노출 근처(50~80%)여야 함
+    assert 0.50 <= up_cap   <= 0.80, f"UpCap={up_cap:.4f} 이탈 (기대 0.5~0.8)"
+    assert 0.55 <= down_cap <= 0.85, f"DnCap={down_cap:.4f} 이탈 (기대 0.55~0.85)"
 
 
 def test_capture_ratios_symmetry():
