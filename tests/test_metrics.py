@@ -180,14 +180,17 @@ def test_sortino_ge_sharpe_when_positive():
 
 def test_annual_turnover_alternating():
     """
-    홀짝 0.51/0.49 교대 → |Δw|=0.02 매 거래일.
-    연 회전율 = 0.02 × (n−1) / (n/252)
+    annual_turnover는 이제 실제 체결 크기(turn_arr)를 입력받는다.
+    홀짝 0.51/0.49 교대 → 매 거래일 체결 크기 0.02.
+    연 회전율 = 0.02 × n / (n/252) = 0.02 × 252 (n→∞ 근사)
+    n 거래일 기준: 0.02 × n / (n/252) = 0.02 × 252 / 1 = 5.04 (정확히 5yr 평균)
     """
     idx = pd.bdate_range("2000-01-03", periods=252 * 5)
-    w = pd.Series(0.51, index=idx)
-    w.iloc[1::2] = 0.49
-    expected = 0.02 * (len(idx) - 1) / 5.0
-    assert annual_turnover(w) == pytest.approx(expected, rel=1e-4)
+    # turn_arr: 매 거래일 0.02씩 체결 (실제 체결 크기 시뮬레이션)
+    n = len(idx)
+    turn_arr = pd.Series(0.02, index=idx)
+    expected = 0.02 * n / (n / 252)   # = 0.02 × 252 = 5.04
+    assert annual_turnover(turn_arr) == pytest.approx(expected, rel=1e-4)
 
 
 # ── 평균 노출 ─────────────────────────────────────────────────────────────────

@@ -44,10 +44,19 @@ def equal_exposure(
     mean_w : 전략의 실현 평균 주식노출 avg_exposure(strategy_weights).
              엔진을 먼저 돌린 뒤 이 값을 사후 주입한다.
 
-    전략과 동일한 rebalance_band·cost_bps로 드리프트 교정 회전율·비용까지
-    동일하게 처리한다. 이 대조군을 위험조정 기준으로 이겨야
-    신호의 알파(타이밍 가치)가 인정된다.
+    ── rebalance_band = 0 고정 (공정 비교 설계) ──────────────────────────────
+    cfg의 rebalance_band를 무시하고 band=0으로 고정한다.
+
+    이유: band > 0이면 강세장에서 드리프트가 방치되어
+    realized mean(w_t) > mean_w 편향이 생긴다(예: band=0.05 → +0.015 초과).
+    "동일 평균노출"이 비교 취지인데 실현 노출이 더 높으면 비교가 어긋난다.
+
+    band=0이면 매일 즉시 교정 → realized mean = mean_w 정확히.
+    드리프트 교정 회전율(~0.4회/년)이 발생하지만, 이는 정적 배분의
+    현실적 유지비용이며 전략의 타이밍 회전율(수회/년)과 별개다.
+    ──────────────────────────────────────────────────────────────────────────
     """
+    cfg_static = {**cfg, "rebalance_band": 0.0}
     idx = equity_returns.reindex(equity_returns.dropna().index).index
     w_target = pd.Series(float(mean_w), index=idx, name="w_static")
-    return run(w_target, equity_returns, rf_annual_pct, cfg)
+    return run(w_target, equity_returns, rf_annual_pct, cfg_static)

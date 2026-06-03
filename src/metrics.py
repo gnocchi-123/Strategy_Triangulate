@@ -124,15 +124,25 @@ def capture_ratios(
     return _ratio(strat_m[up_mask], bench_m[up_mask]), _ratio(strat_m[down_mask], bench_m[down_mask])
 
 
-def annual_turnover(weights: pd.Series) -> float:
-    """one-way |Δw| 합 / 연 수 (연 회전율)"""
-    if len(weights) < 2:
+def annual_turnover(turnover_arr: pd.Series) -> float:
+    """
+    one-way 실제 체결 합 / 연 수 (연 회전율).
+
+    입력: backtest.run() 반환 result["turnover"] — 매 거래일 실제 체결 크기(≥0).
+    이 시리즈는 delta > band 일 때만 비0이다.
+
+    ── 이전 w_held.diff() 방식 폐기 이유 ────────────────────────────────────
+    band=0인 equal_exposure는 w_held가 상수이므로 diff=0 → 실제 거래(0.43/yr)를
+    숨기는 표시 오류가 발생했다. turn_arr를 직접 쓰면 전략과 ee가 같은 기준으로
+    집계되어 비용 일관성이 보장된다.
+    """
+    n = len(turnover_arr)
+    if n == 0:
         return float("nan")
-    delta = weights.diff().abs().dropna()
-    n_years = len(weights) / _ANNUAL
+    n_years = n / _ANNUAL
     if n_years == 0.0:
         return float("nan")
-    return float(delta.sum() / n_years)
+    return float(turnover_arr.sum() / n_years)
 
 
 def avg_exposure(weights: pd.Series) -> float:
@@ -146,9 +156,20 @@ def summary(
     benchmark_returns: pd.Series,
     rf: pd.Series,
     weights: pd.Series,
+    turnover_arr: pd.Series | None = None,
 ) -> dict:
-    """전체 지표 dict 반환 (모두 net 기준)."""
+    """
+    전체 지표 dict 반환 (모두 net 기준).
+
+    turnover_arr: backtest.run() 반환 result["turnover"]. 누락 시 weights.diff()로
+    폴백하지 않고 NaN — 반드시 전달할 것.
+    """
     up_cap, down_cap = capture_ratios(returns_net, benchmark_returns)
+    if turnover_arr is None:
+        raise ValueError(
+            "summary()에 turnover_arr(result['turnover'])를 전달하라. "
+            "w_held.diff() 폴백은 band=0 ee에서 실제 거래를 숨기는 표시 오류를 유발한다."
+        )
     return {
         "cagr":            cagr(equity_net),
         "annual_vol":      annual_vol(returns_net),
@@ -158,6 +179,6 @@ def summary(
         "calmar":          calmar(equity_net),
         "up_capture":      up_cap,
         "down_capture":    down_cap,
-        "annual_turnover": annual_turnover(weights),
+        "annual_turnover": annual_turnover(turnover_arr),
         "avg_exposure":    avg_exposure(weights),
     }

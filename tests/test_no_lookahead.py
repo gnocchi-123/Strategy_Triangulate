@@ -187,6 +187,7 @@ def test_e2e_dummy_constant_weight():
         bench_ret,
         rf_daily,
         result["weights"],
+        result["turnover"],
     )
     assert set(m.keys()) == {
         "cagr", "annual_vol", "sharpe", "sortino",
@@ -220,7 +221,7 @@ def test_e2e_benchmarks():
     assert avg_exposure(bnh["weights"]) == pytest.approx(1.0, abs=0.01)
 
     # equal_exposure는 평균 노출 ≈ mean_w (band 드리프트로 약간 차이)
-    assert avg_exposure(ee["weights"]) == pytest.approx(0.6, abs=0.05)
+    assert avg_exposure(ee["weights"]) == pytest.approx(0.6, abs=0.002)
 
 
 # ── M3-A: VolatilityIndicator 룩어헤드 단언 ───────────────────────────────────
@@ -387,7 +388,115 @@ def test_equal_exposure_uses_realized_weights():
     ee = equal_exposure(realized_mean_w, r_eq, rf_pct, cfg)
 
     # 검증: 대조군 평균노출 ≈ 전략 실현 평균노출
-    assert avg_exposure(ee["weights"]) == pytest.approx(realized_mean_w, abs=0.05), (
+    assert avg_exposure(ee["weights"]) == pytest.approx(realized_mean_w, abs=0.002), (
         f"대조군 avg_exposure({avg_exposure(ee['weights']):.4f}) ≠ "
         f"전략 realized_mean_w({realized_mean_w:.4f})"
     )
+
+
+# ── M3-B: CreditIndicator 룩어헤드 단언 ──────────────────────────────────────
+
+def _make_credit_data(n: int, seed: int) -> dict:
+    """n 거래일 합성 baa10y 데이터 생성."""
+    idx = pd.bdate_range("2000-01-03", periods=n)
+    rng = np.random.default_rng(seed)
+    # baa10y: 1~5% 사이 랜덤워크로 현실적 스프레드 모사
+    spread = 2.0 + np.cumsum(rng.normal(0, 0.02, n))
+    spread = np.clip(spread, 0.5, 8.0)
+    sp_prices = 1000.0 * np.cumprod(1.0 + rng.normal(0.0, 0.01, n))
+    return {
+        "baa10y":  pd.Series(spread, index=idx),
+        "sp500tr": pd.Series(sp_prices, index=idx),
+        "rf":      pd.Series(4.0, index=idx),
+    }
+
+
+def test_credit_future_perturbation_invariant():
+    """
+    (a-credit) baa10y t+k 교란이 t<300 신호에 영향 없음.
+
+    p_t = trailing 252일 백분위: [t-251, t] 구간만 사용.
+    t=300 이후 baa10y를 극단값으로 바꿔도 t<300 신호는 불변이어야 한다.
+    (300은 워밍업 252 + 여유 48)
+    """
+    from src.indicators.credit import CreditIndicator
+    n = 500
+    data = _make_credit_data(n, seed=10)
+    cfg  = {"percentile_window": 252, "theta_low_pct": 0.5,
+            "theta_high_pct": 0.9, "w_max": 1.0}
+
+    ind      = CreditIndicator()
+    sig_orig = ind.signal(data, cfg)
+
+    data_pert = {k: v.copy() for k, v in data.items()}
+    data_pert["baa10y"].iloc[300:] = 99.0   # 극단 스트레스로 교란
+
+    sig_pert = ind.signal(data_pert, cfg)
+
+    # t < 300 신호는 [t-251, t] 구간만 사용 → 불변
+    pd.testing.assert_series_equal(
+        sig_orig.iloc[:300], sig_pert.iloc[:300], check_names=False
+    )
+
+
+def test_credit_signal_execution_lag():
+    """
+    (b-credit) CreditIndicator: 체결 lag 단언.
+    band=0·cost=0 → weights[t] = w_target[t] exactly.
+    r_gross[t] = weights[t-1] × r_eq[t] + (1 − weights[t-1]) × rf[t].
+    """
+    from src.indicators.credit import CreditIndicator
+    n   = 400
+    data = _make_credit_data(n, seed=11)
+    cfg  = {
+        "percentile_window": 252, "theta_low_pct": 0.5,
+        "theta_high_pct": 0.9, "w_max": 1.0,
+        "rebalance_band": 0.0, "cost_bps": 0.0, "borrow_spread_bps": 50,
+    }
+
+    ind      = CreditIndicator()
+    w_target = ind.signal(data, cfg)
+
+    # run()은 dropna() 인덱스 기준 → 워밍업 제외
+    valid_idx = w_target.dropna().index
+    r_eq  = data["sp500tr"].pct_change().reindex(valid_idx).fillna(0.0)
+    rf    = data["rf"].reindex(valid_idx)
+    rf_d  = rf / 100.0 / 252.0
+
+    result  = run(w_target.reindex(valid_idx), r_eq, rf, cfg)
+    weights = result["weights"]
+    r_gross = result["returns_gross"]
+    n_valid = len(valid_idx)
+
+    for t in range(1, n_valid):
+        expected = (
+            weights.iloc[t - 1] * r_eq.iloc[t]
+            + (1.0 - weights.iloc[t - 1]) * rf_d.iloc[t]
+        )
+        assert r_gross.iloc[t] == pytest.approx(expected, abs=1e-12), (
+            f"day {t}: expected {expected:.10f}, got {r_gross.iloc[t]:.10f}"
+        )
+
+
+def test_credit_percentile_alignment_catches_shifted_index():
+    """
+    (c-credit) _assert_percentile_alignment: baa10y 인덱스를 시프트하면 ValueError.
+    정상(동일 인덱스)은 통과.
+    """
+    from src.indicators.credit import _assert_percentile_alignment, _percentile_rank
+
+    n   = 300
+    idx = pd.bdate_range("2000-01-03", periods=n)
+    rng = np.random.default_rng(99)
+    baa = pd.Series(2.0 + np.cumsum(rng.normal(0, 0.02, n)), index=idx).clip(0.5, 8.0)
+
+    # 정상: rolling → 동일 인덱스 → 통과
+    p_ok = _percentile_rank(baa, 21)
+    _assert_percentile_alignment(baa, p_ok)  # 예외 없음
+
+    # 비정상: p 인덱스를 1일 앞당김 → 시프트 감지
+    idx_shifted = idx - pd.tseries.offsets.BusinessDay(1)
+    p_shifted   = pd.Series(p_ok.values, index=idx_shifted)
+
+    with pytest.raises(ValueError):
+        _assert_percentile_alignment(baa, p_shifted)
