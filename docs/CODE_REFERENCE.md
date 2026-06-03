@@ -4,7 +4,7 @@
 
 | 항목 | 내용 |
 |---|---|
-| 기준 커밋 | `8bebbe8b566c2f70e9b6a77a80b2913c390556ce` |
+| 기준 커밋 | `a6747210475c4b130de674f481bcd43955264ecc` |
 | 날짜 | 2026-06-03 |
 | 브랜치 | main |
 
@@ -61,9 +61,11 @@
 | 함수 | 시그니처 | 설명 | 입력 → 출력 |
 |---|---|---|---|
 | `buy_and_hold` | `(equity_returns, rf_annual_pct, cfg) -> dict` | 100% 주식 buy&hold. w_target=1.0 전 기간. `backtest.run` 재사용. | Series×2, cfg → dict |
-| `equal_exposure` | `(mean_w, equity_returns, rf_annual_pct, cfg) -> dict` | 전략 실현 평균 노출(`avg_exposure(result["weights"])`)을 고정비중으로 상수 배분. 동일 엔진·비용 모델. | float, Series×2, cfg → dict |
+| `equal_exposure` | `(mean_w, equity_returns, rf_annual_pct, cfg) -> dict` | 전략 실현 평균 노출을 고정비중으로 상수 배분. **cfg의 rebalance_band를 무시하고 band=0 고정.** | float, Series×2, cfg → dict |
 
 > `equal_exposure`의 `mean_w`는 반드시 `avg_exposure(result["weights"])` (실현 비중 평균)을 사용. `w_target.mean()` 금지.
+>
+> **band=0 고정 이유**: band > 0이면 강세장 drift로 realized mean > target 편향 발생(예: +0.015). "동일 평균노출" 비교 취지에 어긋나므로 band=0으로 매일 즉시 교정. 드리프트 교정 비용 ~0.86bp/yr은 net CAGR에 반영됨.
 
 ---
 
@@ -78,9 +80,11 @@
 | `max_drawdown` | `(equity) -> float` | 최대 낙폭 (음수) | `min(equity/cummax − 1)` |
 | `calmar` | `(equity) -> float` | 칼마 비율 | `CAGR / |MDD|` |
 | `capture_ratios` | `(strategy_returns, benchmark_returns) -> tuple[float, float]` | 상/하방 캡처. Morningstar 표준 연율화. | `ann = (∏(1+r_m))^(12/k) − 1` |
-| `annual_turnover` | `(weights) -> float` | 연 회전율 (one-way) | `Σ|Δw| / 연 수` |
+| `annual_turnover` | `(turnover_arr) -> float` | 연 회전율. **`result["turnover"]`(turn_arr) 입력.** w_held.diff 기준 폐기. | `Σturn_arr / 연 수` |
 | `avg_exposure` | `(weights) -> float` | 평균 주식노출 | `mean(w_t)` |
-| `summary` | `(equity_net, returns_net, benchmark_returns, rf, weights) -> dict` | 위 전 지표를 dict로 반환 | — |
+| `summary` | `(equity_net, returns_net, benchmark_returns, rf, weights, turnover_arr) -> dict` | 위 전 지표를 dict로 반환. **`turnover_arr` 필수** — None이면 ValueError. | — |
+
+> **`annual_turnover` 변경 이유**: w_held.diff()는 band=0 equal_exposure에서 w_held=상수라 0을 반환해 실제 체결(0.43/yr)을 숨기는 표시 오류가 있었음. turn_arr를 직접 사용해 전략·ee가 동일 기준으로 집계됨.
 
 ---
 
@@ -102,6 +106,21 @@
 | `BaseIndicator.signal` | `(data, cfg) -> Series` | 추상 메서드. t일 종가 기준 `w_target ∈ [0, w_max]` 반환 |
 | `standalone_data` | `(data_raw, source: str) -> dict` | 규약 A 헬퍼: `SOURCE_STARTS[source]`로 슬라이싱. 동일 정보원 변형끼리 동일 입력 보장 |
 | `ConstantWeightIndicator` | `class(BaseIndicator)` | 항상 고정 비중 반환하는 더미 신호 (테스트·M2 엔드투엔드 전용) |
+
+---
+
+### `src/indicators/credit.py`
+
+| 항목 | 시그니처 | 설명 |
+|---|---|---|
+| `CreditIndicator` | `class(BaseIndicator)` | 신용 신호 (DEFINITIONS 1.2·1.4, BAA10Y 대표) |
+| `CreditIndicator.signal` | `(data, cfg) -> Series` | baa10y → trailing 백분위 → 단조 감소 매핑. 워밍업(W-1일) NaN 반환. |
+| `_percentile_rank` | `(s, window) -> Series` | trailing W일 causal 백분위. `(arr <= arr[-1]).sum() / len(arr)`. 첫 W-1일 NaN. |
+| `_monotone_map` | `(p, theta_low, theta_high, w_max) -> Series` | p<θ_low→w_max, p>θ_high→0, 사이 선형 보간 (DEFINITIONS 1.4 임계 방식). |
+| `_assert_percentile_alignment` | `(baa10y, p) -> None` | p 인덱스 정합 단언. 시프트 감지 시 ValueError. `_assert_realized_alignment`와 동급. |
+
+**cfg 파라미터**: `percentile_window=252`, `theta_low_pct=0.5`, `theta_high_pct=0.9`, `w_max=1.0`
+eval_start: `standalone_data(data_raw, "credit")` → 1986-01-01 입력 → rolling(252) 워밍업 후 **1988-12-29**
 
 ---
 
@@ -259,15 +278,19 @@ def capture_ratios(
     return _ratio(strat_m[up_mask], bench_m[up_mask]), _ratio(strat_m[down_mask], bench_m[down_mask])
 
 
-def annual_turnover(weights: pd.Series) -> float:
-    """one-way |Δw| 합 / 연 수 (연 회전율)"""
-    if len(weights) < 2:
+def annual_turnover(turnover_arr: pd.Series) -> float:
+    """
+    one-way 실제 체결 합 / 연 수 (연 회전율).
+    입력: result["turnover"] — 매 거래일 실제 체결 크기(≥0).
+    w_held.diff() 방식 폐기: band=0 ee에서 w_held=상수 → diff=0으로 실거래 숨김.
+    """
+    n = len(turnover_arr)
+    if n == 0:
         return float("nan")
-    delta = weights.diff().abs().dropna()
-    n_years = len(weights) / _ANNUAL
+    n_years = n / _ANNUAL
     if n_years == 0.0:
         return float("nan")
-    return float(delta.sum() / n_years)
+    return float(turnover_arr.sum() / n_years)
 
 
 def avg_exposure(weights: pd.Series) -> float:
@@ -281,9 +304,15 @@ def summary(
     benchmark_returns: pd.Series,
     rf: pd.Series,
     weights: pd.Series,
+    turnover_arr: pd.Series | None = None,
 ) -> dict:
-    """전체 지표 dict 반환 (모두 net 기준)."""
+    """
+    전체 지표 dict 반환 (모두 net 기준).
+    turnover_arr: result["turnover"] 필수. None이면 ValueError.
+    """
     up_cap, down_cap = capture_ratios(returns_net, benchmark_returns)
+    if turnover_arr is None:
+        raise ValueError("turnover_arr(result['turnover']) 필수 — band=0 ee 표시 오류 방지")
     return {
         "cagr":            cagr(equity_net),
         "annual_vol":      annual_vol(returns_net),
@@ -293,7 +322,7 @@ def summary(
         "calmar":          calmar(equity_net),
         "up_capture":      up_cap,
         "down_capture":    down_cap,
-        "annual_turnover": annual_turnover(weights),
+        "annual_turnover": annual_turnover(turnover_arr),
         "avg_exposure":    avg_exposure(weights),
     }
 ```
@@ -478,15 +507,45 @@ class ConstantWeightIndicator(BaseIndicator):
 
 ---
 
+### `src/indicators/credit.py` (핵심 로직)
+
+```python
+def _percentile_rank(s: pd.Series, window: int) -> pd.Series:
+    """trailing W일 causal 백분위. arr[-1]=현재값 기준."""
+    def _rank_last(arr: np.ndarray) -> float:
+        return float((arr <= arr[-1]).sum()) / len(arr)
+    return s.rolling(window, min_periods=window).apply(_rank_last, raw=True)
+
+
+def _monotone_map(p, theta_low, theta_high, w_max) -> pd.Series:
+    """DEFINITIONS 1.4: p<θ_low→w_max, p>θ_high→0, 사이 선형보간."""
+    span = theta_high - theta_low
+    w_vals = np.where(p.isna(), np.nan,
+        np.where(p < theta_low, w_max,
+            np.where(p > theta_high, 0.0,
+                w_max * (theta_high - p.values) / span)))
+    return pd.Series(w_vals, index=p.index)
+
+
+def _assert_percentile_alignment(baa10y, p) -> None:
+    """p 인덱스 정합 단언 (_assert_realized_alignment 동급)."""
+    if not baa10y.index.equals(p.index):
+        raise ValueError("percentile p 인덱스 불일치 — 룩어헤드 위험")
+    if baa10y.dropna().index[-1] != p.dropna().index[-1]:
+        raise ValueError("percentile 마지막 유효일 불일치 — 룩어헤드 위험")
+```
+
+---
+
 ## 참고: 파이프라인 흐름
 
 ```
-load_all(cfg)                          # data_loader.py
+load_all(cfg)                              # data_loader.py
     └─ standalone_data(data_raw, source)   # base.py (단독 M3)
         └─ indicator.signal(data, cfg)     # volatility / credit / trend
             └─ w.dropna().index[0] = eval_start
                 └─ backtest.run(w, sp_r, rf, cfg)
-                    ├─ buy_and_hold(sp_r, rf, cfg)        # benchmarks.py
-                    ├─ equal_exposure(mean_w, sp_r, rf)   # benchmarks.py
-                    └─ metrics.summary(equity, returns, bench, rf, weights)
+                    ├─ buy_and_hold(sp_r, rf, cfg)               # benchmarks.py
+                    ├─ equal_exposure(mean_w, sp_r, rf, cfg)     # benchmarks.py (band=0)
+                    └─ metrics.summary(..., result["turnover"])  # turnover_arr 필수
 ```
