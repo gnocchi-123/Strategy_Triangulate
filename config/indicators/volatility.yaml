@@ -1,0 +1,18 @@
+# config/indicators/volatility.yaml — DEFINITIONS 1.1 변동성 신호 파라미터
+# (DEFINITIONS_AND_CONVENTIONS.md 5절 config 스키마 기준)
+
+vol_estimator: "vix"          # vix | realized | blend
+                              # vix: σ_t = VIX_t/100, 워밍업 없음, 1990-01-02~
+                              # realized: N일 rolling std × √252, 워밍업 N거래일
+                              # blend: vix + realized 가중 평균
+
+realized_lookback: 21         # realized σ_t 롤링 윈도우 (거래일)
+ewma_lambda:       0.94       # EWMA 감쇠 계수 (realized 대안, M4 그리드 대상)
+
+blend_weights:                # blend 모드 가중치 (합계 = 1)
+  vix:      0.5
+  realized: 0.5
+
+# 기간구조 변형: VIX/VIX3M. 표본 2007~, 기본 비활성 (보조 variant용).
+# 활성화 시 DEFINITIONS 1.4 단조 매핑 적용.
+term_structure_enabled: false

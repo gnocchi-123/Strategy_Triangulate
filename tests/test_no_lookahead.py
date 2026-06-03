@@ -9,6 +9,15 @@ tests/test_no_lookahead.py — 룩어헤드 방지 단언
     즉 t일 수익은 t−1 정보로 확정된 비중으로 계산된다.
 
 엔드투엔드: ConstantWeightIndicator → backtest.run() → metrics.summary() 흐름 확인.
+
+M3-A 추가: VolatilityIndicator(더미 아닌 진짜 신호)로 두 단언 실제 통과 검증.
+  (a-vix)  VIX 모드 미래 교란 불변
+  (a-real) realized 모드 미래 교란 불변
+  (b-vol)  VIX 모드 체결 lag
+
+M3-A 추가 규약 단언:
+  (c) _assert_realized_alignment: 시프트된 σ 인덱스를 감지해 ValueError 발생.
+  (d) equal_exposure mean_w = avg_exposure(result["weights"])  (실현 비중 평균, 목표비중 평균 아님).
 """
 from __future__ import annotations
 
@@ -212,3 +221,173 @@ def test_e2e_benchmarks():
 
     # equal_exposure는 평균 노출 ≈ mean_w (band 드리프트로 약간 차이)
     assert avg_exposure(ee["weights"]) == pytest.approx(0.6, abs=0.05)
+
+
+# ── M3-A: VolatilityIndicator 룩어헤드 단언 ───────────────────────────────────
+
+def _make_vol_data(n: int, seed: int) -> tuple[dict, pd.DatetimeIndex]:
+    idx = pd.bdate_range("2005-01-03", periods=n)
+    rng = np.random.default_rng(seed)
+    sp_prices = 1000.0 * np.cumprod(1.0 + rng.normal(0.0, 0.01, n))
+    data = {
+        "vix":     pd.Series(rng.uniform(10.0, 40.0, n), index=idx),
+        "sp500tr": pd.Series(sp_prices, index=idx),
+    }
+    return data, idx
+
+
+def test_vol_vix_future_perturbation_invariant():
+    """
+    (a-vix) VIX 모드: t+k VIX를 극단값으로 교란해도 t<40 signal 불변.
+    VIX 신호는 각 t에서 VIX[t]만 사용 → 미래 교란 전파 없음.
+    """
+    from src.indicators.volatility import VolatilityIndicator
+    data, _ = _make_vol_data(80, seed=42)
+    cfg = {"vol_estimator": "vix", "sigma_target": 0.12, "w_max": 1.0}
+
+    ind = VolatilityIndicator()
+    sig_orig = ind.signal(data, cfg)
+
+    data_pert = {k: v.copy() for k, v in data.items()}
+    data_pert["vix"].iloc[40:] = 200.0          # 미래 극단 VIX
+    sig_pert = ind.signal(data_pert, cfg)
+
+    pd.testing.assert_series_equal(
+        sig_orig.iloc[:40], sig_pert.iloc[:40], check_names=False
+    )
+
+
+def test_vol_realized_future_perturbation_invariant():
+    """
+    (a-real) realized 모드: t+k sp500tr 교란이 t<50 signal에 영향 없음.
+    rolling(N) std at t → sp_ret[t-N+1:t] causal 구간만 사용.
+    """
+    from src.indicators.volatility import VolatilityIndicator
+    N = 21
+    data, _ = _make_vol_data(100, seed=43)
+    cfg = {"vol_estimator": "realized", "realized_lookback": N,
+           "sigma_target": 0.12, "w_max": 1.0}
+
+    ind = VolatilityIndicator()
+    sig_orig = ind.signal(data, cfg)
+
+    # sp500tr[50:]을 100배 교란 → sp_ret[50]~가 바뀌고 sigma[50+]도 바뀜
+    data_pert = {k: v.copy() for k, v in data.items()}
+    data_pert["sp500tr"].iloc[50:] *= 100.0
+    sig_pert = ind.signal(data_pert, cfg)
+
+    # sigma[t<50] 은 sp_ret[t-N+1..t], 모두 50 미만 인덱스 → 불변
+    pd.testing.assert_series_equal(
+        sig_orig.iloc[:50], sig_pert.iloc[:50], check_names=False
+    )
+
+
+def test_vol_signal_execution_lag():
+    """
+    (b-vol) VolatilityIndicator(vix 모드): 체결 lag 단언.
+    band=0·cost=0 → weights[t] = w_target[t] exactly.
+    r_gross[t] = weights[t-1] × r_eq[t] + (1 − weights[t-1]) × rf[t].
+    """
+    from src.indicators.volatility import VolatilityIndicator
+    n = 60
+    data, idx = _make_vol_data(n, seed=7)
+    cfg = {
+        "vol_estimator": "vix", "sigma_target": 0.12, "w_max": 1.0,
+        "rebalance_band": 0.0, "cost_bps": 0.0, "borrow_spread_bps": 50,
+    }
+
+    w_target = VolatilityIndicator().signal(data, cfg)
+    r_eq    = data["sp500tr"].pct_change().fillna(0.0)
+    rf_pct  = pd.Series(4.0, index=idx)
+
+    result  = run(w_target, r_eq, rf_pct, cfg)
+    weights = result["weights"]
+    r_gross = result["returns_gross"]
+    rf_d    = rf_pct / 100.0 / 252.0
+
+    for t in range(1, n):
+        expected = (
+            weights.iloc[t - 1] * r_eq.iloc[t]
+            + (1.0 - weights.iloc[t - 1]) * rf_d.iloc[t]
+        )
+        assert r_gross.iloc[t] == pytest.approx(expected, abs=1e-12), (
+            f"day {t}: expected {expected:.10f}, got {r_gross.iloc[t]:.10f}"
+        )
+
+
+# ── (c) _assert_realized_alignment: 시프트 감지 ───────────────────────────────
+
+def test_realized_alignment_catches_shifted_index():
+    """
+    (c) _assert_realized_alignment: σ 인덱스를 1일 앞당기면 ValueError(룩어헤드).
+    정상(동일 인덱스)은 통과.
+    """
+    from src.indicators.volatility import _assert_realized_alignment
+
+    n = 60
+    idx = pd.bdate_range("2010-01-04", periods=n)
+    rng = np.random.default_rng(5)
+    sp_prices = 100.0 * np.cumprod(1.0 + rng.normal(0.0, 0.01, n))
+    sp_ret = pd.Series(sp_prices, index=idx).pct_change()
+
+    # 정상: rolling → 동일 인덱스 → 통과
+    sigma_ok = sp_ret.rolling(5).std() * np.sqrt(252)
+    _assert_realized_alignment(sp_ret, sigma_ok)  # 예외 없음
+
+    # 비정상: σ 인덱스를 1일 앞당김 (길이 같지만 인덱스 다름)
+    idx_shifted = idx - pd.tseries.offsets.BusinessDay(1)
+    sigma_shifted = pd.Series(sigma_ok.values, index=idx_shifted)
+
+    with pytest.raises(ValueError, match="룩어헤드"):
+        _assert_realized_alignment(sp_ret, sigma_shifted)
+
+
+# ── (d) equal_exposure: 실현 비중 평균 사용 패턴 ──────────────────────────────
+
+def test_equal_exposure_uses_realized_weights():
+    """
+    (d) equal_exposure mean_w = avg_exposure(result["weights"]).
+    목표비중 평균(w_target.mean()) 아님.
+
+    올바른 패턴:
+      result = run(w_target, ...)
+      mean_w = avg_exposure(result["weights"])   ← 실현 비중 평균
+      ee = equal_exposure(mean_w, ...)
+
+    이 패턴으로 실행한 equal_exposure의 avg_exposure ≈ 전략의 avg_exposure.
+    """
+    n = 252 * 2
+    idx = pd.bdate_range("2010-01-04", periods=n)
+    rng = np.random.default_rng(77)
+    r_eq = pd.Series(rng.normal(0.0004, 0.012, n), index=idx)
+    rf_pct = pd.Series(4.0, index=idx)
+    cfg = {
+        "rebalance_band": 0.05, "cost_bps": 2.0, "w_max": 1.0,
+        "borrow_spread_bps": 50,
+    }
+
+    # VolatilityIndicator vix 모드로 실제 신호 생성
+    from src.indicators.volatility import VolatilityIndicator
+    data_mock = {
+        "vix":     pd.Series(rng.uniform(10.0, 40.0, n), index=idx),
+        "sp500tr": pd.Series(
+            100.0 * np.cumprod(1.0 + rng.normal(0.0, 0.01, n)), index=idx
+        ),
+    }
+    w_target = VolatilityIndicator().signal(
+        data_mock, {"vol_estimator": "vix", "sigma_target": 0.12, **cfg}
+    )
+
+    result = run(w_target, r_eq, rf_pct, cfg)
+
+    # 실현 비중 평균 (올바른 방법)
+    realized_mean_w = avg_exposure(result["weights"])
+
+    # equal_exposure를 realized_mean_w로 실행
+    ee = equal_exposure(realized_mean_w, r_eq, rf_pct, cfg)
+
+    # 검증: 대조군 평균노출 ≈ 전략 실현 평균노출
+    assert avg_exposure(ee["weights"]) == pytest.approx(realized_mean_w, abs=0.05), (
+        f"대조군 avg_exposure({avg_exposure(ee['weights']):.4f}) ≠ "
+        f"전략 realized_mean_w({realized_mean_w:.4f})"
+    )
