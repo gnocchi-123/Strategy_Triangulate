@@ -4,8 +4,8 @@
 
 | 항목 | 내용 |
 |---|---|
-| 기준 커밋 | `a6747210475c4b130de674f481bcd43955264ecc` |
-| 날짜 | 2026-06-03 |
+| 기준 커밋 | `5f6313c` |
+| 날짜 | 2026-06-04 |
 | 브랜치 | main |
 
 ---
@@ -120,7 +120,35 @@
 | `_assert_percentile_alignment` | `(baa10y, p) -> None` | p 인덱스 정합 단언. 시프트 감지 시 ValueError. `_assert_realized_alignment`와 동급. |
 
 **cfg 파라미터**: `percentile_window=252`, `theta_low_pct=0.5`, `theta_high_pct=0.9`, `w_max=1.0`
-eval_start: `standalone_data(data_raw, "credit")` → 1986-01-01 입력 → rolling(252) 워밍업 후 **1988-12-29**
+eval_start: `standalone_data(data_raw, "credit")` → 1986-01-01 입력 → sp500tr inner join으로 1988-01-04부터 시작 → rolling(252) 워밍업 후 **1988-12-29**
+
+---
+
+### `src/indicators/trend.py`
+
+| 항목 | 시그니처 | 설명 |
+|---|---|---|
+| `TrendIndicator` | `class(BaseIndicator)` | 추세 신호 (DEFINITIONS 1.3, ma200 \| tsmom12) |
+| `TrendIndicator.signal` | `(data, cfg) -> Series` | cfg `rule`로 ma200/tsmom12 분기. 워밍업 NaN 반환. sp500tr 가격만 사용. |
+| `_ma200_signal` | `(prices, w_floor, w_max) -> Series` | rolling(200).mean() = MA200_t. `P_t > MA200_t` → w_max, else → w_floor. 워밍업 199일 NaN. |
+| `_tsmom12_signal` | `(prices, w_floor, w_max) -> Series` | iloc 기반 `P[i]/P[i-252]-1`. r12>0 → w_max, else → w_floor. 워밍업 252일 NaN. |
+| `_assert_ma200_alignment` | `(prices, ma200) -> None` | MA200 인덱스 정합 단언. 시프트·길이 불일치 → ValueError("룩어헤드"). |
+| `_assert_tsmom_alignment` | `(prices, w) -> None` | TSMOM 워밍업 경계(첫 252일 NaN, iloc[252] non-NaN) 단언. 위반 → ValueError("룩어헤드"). |
+
+**`TrendIndicator.signal` cfg 파라미터**:
+
+| 키 | 값 | 설명 |
+|---|---|---|
+| `rule` | `"ma200"` \| `"tsmom12"` | 신호 규칙 선택 |
+| `w_floor` | 0.0 | 방어 시 최소 노출 (변형 0.5는 M4 전용) |
+| `w_max` | 1.0 | 최대 주식노출 |
+
+eval_start: `standalone_data(data_raw, "trend")` → 1988-01-01 입력 (sp500tr inner join → 1988-01-04)
+- ma200: rolling(200) 워밍업 후 **1988-10-14**
+- tsmom12: iloc lag=252 워밍업 후 **1988-12-30**
+
+> w_floor=0.5 변형·연속 스케일 변형은 추가하지 않음 (M4 robustness 전용).
+> 외부 데이터 없음 — sp500tr 가격에서만 계산.
 
 ---
 
@@ -537,15 +565,100 @@ def _assert_percentile_alignment(baa10y, p) -> None:
 
 ---
 
+### `src/indicators/trend.py` (핵심 로직)
+
+```python
+class TrendIndicator(BaseIndicator):
+    """DEFINITIONS 1.3 추세 신호 (ma200 | tsmom12)."""
+
+    def signal(self, data: dict[str, pd.Series], cfg: dict) -> pd.Series:
+        rule    = cfg.get("rule", "ma200")
+        w_floor = float(cfg.get("w_floor", 0.0))
+        w_max   = float(cfg.get("w_max",   1.0))
+        prices  = data["sp500tr"].dropna()
+
+        if rule == "ma200":
+            w = _ma200_signal(prices, w_floor, w_max)
+        elif rule == "tsmom12":
+            w = _tsmom12_signal(prices, w_floor, w_max)
+        else:
+            raise ValueError(f"알 수 없는 trend rule: {rule!r}")
+        w.name = "w_trend"
+        return w
+
+
+def _ma200_signal(prices, w_floor, w_max):
+    """
+    rolling(200, min_periods=200).mean() = MA200_t.
+    t 위치에서 P[t-199:t+1] causal 구간 사용 (closed='right' 기본).
+    w_t = w_max if P_t > MA200_t else w_floor.
+    첫 199일 NaN (워밍업).
+    """
+    ma200 = prices.rolling(200, min_periods=200).mean()
+    _assert_ma200_alignment(prices, ma200)
+    above = prices > ma200
+    w = above.map({True: w_max, False: w_floor}).astype(float)
+    w[ma200.isna()] = np.nan
+    return w
+
+
+def _tsmom12_signal(prices, w_floor, w_max):
+    """
+    r12_t = P[i] / P[i-252] - 1  (iloc 직접 참조, off-by-one 방지).
+    w_t = w_max if r12 > 0 else w_floor.
+    첫 252일 NaN (워밍업).
+    """
+    n, lag = len(prices), 252
+    w_vals = np.full(n, np.nan)
+    for i in range(lag, n):
+        r12 = prices.iloc[i] / prices.iloc[i - lag] - 1.0
+        w_vals[i] = w_max if r12 > 0.0 else w_floor
+    w = pd.Series(w_vals, index=prices.index)
+    _assert_tsmom_alignment(prices, w)
+    return w
+
+
+def _assert_ma200_alignment(prices, ma200):
+    """MA200 인덱스 정합 단언 (인덱스 동일성 + 마지막 유효일 일치)."""
+    if prices.dropna().empty or ma200.dropna().empty:
+        return
+    if not prices.index.equals(ma200.index):
+        raise ValueError("MA200 인덱스 불일치 — 시프트 또는 길이 불일치: 룩어헤드 위험")
+    if prices.dropna().index[-1] != ma200.dropna().index[-1]:
+        raise ValueError("MA200 마지막 유효일 불일치: 룩어헤드 위험")
+
+
+def _assert_tsmom_alignment(prices, w):
+    """TSMOM 워밍업 경계 단언 (첫 252일 NaN, iloc[252] non-NaN, 인덱스 동일성)."""
+    if prices.dropna().empty or w.dropna().empty:
+        return
+    if not prices.index.equals(w.index):
+        raise ValueError("TSMOM w 인덱스 불일치 — 룩어헤드 위험")
+    if len(w) > 252:
+        if not w.iloc[:252].isna().all():
+            raise ValueError("TSMOM 워밍업 구간(첫 252일)에 non-NaN — 룩어헤드 위험")
+        if np.isnan(w.iloc[252]):
+            raise ValueError("TSMOM w.iloc[252] NaN — 252일 후 신호 미생성")
+    if prices.dropna().index[-1] != w.dropna().index[-1]:
+        raise ValueError("TSMOM 마지막 유효일 불일치: 룩어헤드 위험")
+```
+
+---
+
 ## 참고: 파이프라인 흐름
 
 ```
 load_all(cfg)                              # data_loader.py
-    └─ standalone_data(data_raw, source)   # base.py (단독 M3)
-        └─ indicator.signal(data, cfg)     # volatility / credit / trend
+    └─ standalone_data(data_raw, source)   # base.py (단독 M3; source = volatility|credit|trend)
+        └─ indicator.signal(data, cfg)     # VolatilityIndicator / CreditIndicator / TrendIndicator
             └─ w.dropna().index[0] = eval_start
                 └─ backtest.run(w, sp_r, rf, cfg)
                     ├─ buy_and_hold(sp_r, rf, cfg)               # benchmarks.py
                     ├─ equal_exposure(mean_w, sp_r, rf, cfg)     # benchmarks.py (band=0)
                     └─ metrics.summary(..., result["turnover"])  # turnover_arr 필수
+
+# M3 단독 검증 eval_start 요약
+# volatility: vix=1990-01-02, realized/blend=1990-01-31
+# credit:     baa10y=1988-12-29  (sp500tr inner join → 1988-01-04 기준, rolling 252)
+# trend:      ma200=1988-10-14, tsmom12=1988-12-30  (sp500tr inner join → 1988-01-04 기준)
 ```
