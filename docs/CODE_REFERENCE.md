@@ -4,7 +4,7 @@
 
 | 항목 | 내용 |
 |---|---|
-| 기준 커밋 | `5f6313c` |
+| 기준 커밋 | `55a19e2` |
 | 날짜 | 2026-06-04 |
 | 브랜치 | main |
 
@@ -94,6 +94,48 @@
 |---|---|---|
 | `combine_equal_weight` | `(signals: dict[str, Series], cfg) -> Series` | 등가중 평균 `w_comb = mean_i(w^(i))`. **스텁, M5에서 구현.** |
 | `combine_vote` | `(signals, cfg, threshold=0.5) -> Series` | 투표 기반 결합 (방어 신호 과반 시 노출 축소). **스텁, M5에서 구현.** |
+
+---
+
+### `notebooks/03_independence.ipynb` (M4 — 독립성 분석 · Gate 1)
+
+**공통기간:** 1990-01-31~ (N=9148 거래일, realized·blend 워밍업 바닥)
+
+| 섹션 | 내용 |
+|---|---|
+| §1 공통기간 재백테스트 | 6개 신호 공통기간 성과 재산출 → `results/common1990_metrics.csv` |
+| §2 신호 상관 (i) | `w_target` 시리즈 간 Pearson 상관 → `results/independence_signal_corr.csv` |
+| §3 전략 수익 상관 | 총수익 상관 행렬 (참고) → `results/independence_return_corr.csv` |
+| §4 능동수익 정의 | 전략−B&H(구) vs **전략−ee(A, 기준)** — 공통 주식베타 제거 목적 |
+| §5 신용 교차검증 | credit 5쌍 (i)·(A) 병기표 + 영역 분류 |
+| §6 Gate 1 최종 판정 | 기준1(Sharpe/Sortino/Calmar vs ee, 3개 중 2개 이상) 적용 |
+| §7 히트맵 저장 | (i)·(B)·(A) 3패널 → `results/independence_corr_heatmap.png` |
+| §8 Gate 1 해석 노트 | 신용 판정 (i)·(A) 병기 근거 + M5 재검토 단서 기록 |
+
+**산출물 파일:**
+
+| 파일 | 설명 |
+|---|---|
+| `results/common1990_metrics.csv` | 공통기간 전 신호 성과표 |
+| `results/independence_signal_corr.csv` | (i) 신호 w_t 상관 행렬 |
+| `results/independence_active_corr.csv` | (A) 전략-ee 수익 상관 행렬 |
+| `results/independence_active_bh_corr.csv` | (B) 전략-B&H 수익 상관 (참고용) |
+| `results/independence_return_corr.csv` | 전략 총수익 상관 행렬 |
+| `results/independence_corr_heatmap.png` | (i)·(B)·(A) 3패널 히트맵 |
+
+**Gate 1 사전 등록 임계 (코드 Cell 2, 불변):**
+```python
+CORR_LOW  = 0.30   # |ρ| < 0.30  → 저상관
+CORR_HIGH = 0.50   # |ρ| > 0.50  → 고상관
+# 0.30 ≤ |ρ| ≤ 0.50 → 회색지대: (i) 신호상관 병기 판단
+```
+
+**Gate 1 포함/제외 명단:**
+- 변동성 INCLUDE (3변형 모두 기준1 통과, 대표 변형은 M5 이월)
+- 추세 INCLUDE (ma200·tsmom12 기준1 통과)
+- 신용 EXCLUDE (기준1 실패 + 변동성 (A) 고상관 + (i)·(A) 병기 종합)
+
+**M5 재검토 단서 (기록 전용):** credit↔tsmom12 (i)=0.288(저상관) — 볼+추세 결합 분산이득이 불충분 시 신용을 추세 보완 원소로 조건부 재검토 가능.
 
 ---
 
@@ -661,4 +703,11 @@ load_all(cfg)                              # data_loader.py
 # volatility: vix=1990-01-02, realized/blend=1990-01-31
 # credit:     baa10y=1988-12-29  (sp500tr inner join → 1988-01-04 기준, rolling 252)
 # trend:      ma200=1988-10-14, tsmom12=1988-12-30  (sp500tr inner join → 1988-01-04 기준)
+
+# M4 독립성 분석 (notebooks/03_independence.ipynb)
+# 공통기간: 1990-01-31~ (realized·blend 워밍업 바닥)
+# 능동수익: 전략 − ee (동일노출 정적, band=0)
+# Gate 1 결과: 변동성 INCLUDE / 추세 INCLUDE / 신용 EXCLUDE
+# 신용 판정 근거: (i)·(A) 병기 종합 — 기준1 실패 + 변동성 (A) 고상관 + 추세와 전략 수준 고상관
+# M5 이월 결정: 변동성 대표 변형 선정 (사전등록 원칙 적용)
 ```
